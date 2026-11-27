@@ -435,7 +435,7 @@
     }
     #radial.open .orb.swatch:hover { background: var(--swatch); border-color: rgba(240, 246, 252, 0.5); }
     .orb.swatch.current { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--swatch), 0 6px 16px rgba(1, 4, 9, 0.6); }
-    .orb svg, .tool svg {
+    .orb svg, .tool svg, .kbtn svg {
       width: 17px;
       height: 17px;
       stroke: currentColor;
@@ -445,6 +445,51 @@
       stroke-linejoin: round;
       pointer-events: none;
     }
+
+    /* ---------- Keyboard bar (Tab) ---------- */
+    #kbar {
+      position: fixed;
+      left: 50%;
+      bottom: 28px;
+      transform: translate(-50%, 12px);
+      display: flex;
+      gap: 8px;
+      padding: 8px;
+      border-radius: 999px;
+      background: rgba(22, 27, 34, 0.92);
+      border: 1px solid #30363d;
+      box-shadow: 0 12px 32px rgba(1, 4, 9, 0.6);
+      z-index: 35;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 140ms ease, transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    #kbar.open { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+    .kbtn {
+      width: 38px;
+      height: 38px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1px solid var(--orb-border);
+      background: var(--orb-bg);
+      color: var(--orb-icon);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 120ms ease, background-color 100ms ease, color 100ms ease, border-color 100ms ease;
+    }
+    .kbtn.focus, .kbtn:hover {
+      background: var(--orb-bg-hover);
+      color: #f0f6fc;
+      border-color: rgba(240, 246, 252, 0.3);
+      transform: scale(1.1);
+    }
+    .kbtn[data-action="delete"].focus, .kbtn[data-action="delete"]:hover { color: var(--danger); border-color: rgba(248, 81, 73, 0.45); }
+    .kbtn.swatch { width: 30px; height: 30px; margin: 4px 0; background: var(--swatch); }
+    .kbtn.swatch.focus, .kbtn.swatch:hover { background: var(--swatch); box-shadow: 0 0 0 2px #161b22, 0 0 0 3.5px var(--swatch); }
+
+    .bcell.cur, .mtile.cur { box-shadow: inset 0 0 0 2px #f0f6fc, inset 0 0 0 3px rgba(1, 4, 9, 0.7); }
 
     /* ---------- Centered panels ---------- */
     #shade {
@@ -728,6 +773,7 @@
   </main>
   <div id="radial" aria-hidden="true"></div>
   <div id="shade"></div>
+  <div id="kbar" aria-hidden="true"></div>
 
   <!-- brush 16x16 -->
   <div id="brushPanel" class="panel" role="dialog" aria-label="brush">
@@ -1521,14 +1567,15 @@
 
       const curGrid = () => brush.tag._frames[brush.frame];
 
-      function openBrush(tag) {
+      function openBrush(tag, kb = false) {
         if (!tag || !tag.isConnected) return;
         commitEditing();
         closeMenu(true);
         closeScene();
         brush = {
           tag, frame: 0, slot: lastSlot, tool: 'pen',
-          mirror: brush ? brush.mirror : false, history: [], down: false, btn: 0
+          mirror: brush ? brush.mirror : false, history: [], down: false, btn: 0,
+          cx: 8, cy: 8, kb, spaceDown: false, curEl: null
         };
         brushName.textContent = nameOf(tag);
         loopCtl.hidden = !tag._loop;
@@ -1538,6 +1585,7 @@
         renderBrushGrid();
         renderFrames();
         syncBrushTools();
+        syncBrushCursor();
         openPanel(brushPanel);
       }
 
@@ -1659,6 +1707,7 @@
         brush.frame = clamp(i, 0, brush.tag._frames.length - 1);
         renderBrushGrid();
         renderFrames();
+        syncBrushCursor();
       }
       function moveFrame(from, to) {
         const t = brush.tag;
@@ -1813,22 +1862,64 @@
         syncTagVisual(brush.tag);
       });
 
+      const DIRS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+
+      function syncBrushCursor() {
+        if (brush.curEl) brush.curEl.classList.remove('cur');
+        brush.curEl = null;
+        if (!brush.kb) return;
+        brush.curEl = bgrid.children[brush.cy * 16 + brush.cx];
+        brush.curEl.classList.add('cur');
+      }
+
+      function kbPaint() {
+        const i = brush.cy * 16 + brush.cx;
+        brush.btn = 0;
+        if (brush.tool === 'bucket') flood(i, brush.slot);
+        else paintAt(i, brushValue());
+        liveRefresh();
+      }
+
       function brushKeys(e) {
         if (e.target === fpsIn) { if (e.key === 'Escape') closeBrush(); return; }
-        const k = e.key.toLowerCase();
-        if (e.key === 'Escape') { e.preventDefault(); closeBrush(); }
-        else if ((e.metaKey || e.ctrlKey) && k === 'z') { e.preventDefault(); undoBrush(); }
-        else if (/^[1-9]$/.test(k)) pickSlot(+k, false);
-        else if (k === 'p' || k === 'g' || k === 'e') {
-          brush.tool = k === 'p' ? 'pen' : k === 'g' ? 'bucket' : 'erase';
+        const k = e.key, lk = k.toLowerCase();
+        if (k === 'Escape') { e.preventDefault(); closeBrush(); }
+        else if ((e.metaKey || e.ctrlKey) && lk === 'z') { e.preventDefault(); undoBrush(); }
+        else if (DIRS[k]) {
+          e.preventDefault();
+          if (brush.kb) {
+            brush.cx = clamp(brush.cx + DIRS[k][0], 0, 15);
+            brush.cy = clamp(brush.cy + DIRS[k][1], 0, 15);
+          }
+          brush.kb = true;
+          syncBrushCursor();
+          if (brush.spaceDown) kbPaint();
+        } else if (k === ' ') {
+          e.preventDefault();
+          if (e.repeat) return;
+          brush.kb = true;
+          syncBrushCursor();
+          pushHistory();
+          brush.spaceDown = true;
+          kbPaint();
+        } else if (k === 'Delete' || k === 'Backspace') {
+          e.preventDefault();
+          brush.kb = true;
+          syncBrushCursor();
+          pushHistory();
+          paintAt(brush.cy * 16 + brush.cx, 0);
+          liveRefresh();
+          syncTagVisual(brush.tag);
+        } else if ((k === ',' || k === '.') && brush.tag._loop) {
+          const n = brush.tag._frames.length;
+          selectFrame((brush.frame + (k === '.' ? 1 : -1) + n) % n);
+          syncBrushCursor();
+        } else if (/^[1-9]$/.test(k)) pickSlot(+k, false);
+        else if (lk === 'p' || lk === 'g' || lk === 'e') {
+          brush.tool = lk === 'p' ? 'pen' : lk === 'g' ? 'bucket' : 'erase';
           syncBrushTools();
           renderDots();
-        } else if (k === 'm') { brush.mirror = !brush.mirror; syncBrushTools(); }
-        else if (brush.tag._loop && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-          e.preventDefault();
-          const n = brush.tag._frames.length;
-          selectFrame((brush.frame + (e.key === 'ArrowRight' ? 1 : -1) + n) % n);
-        }
+        } else if (lk === 'm') { brush.mirror = !brush.mirror; syncBrushTools(); }
       }
 
       // ---------- {scene} editor ----------
@@ -1838,14 +1929,14 @@
 
       const piecesOf = (s) => s._folder._tags.filter(hasPixels);
 
-      function openScene(s) {
+      function openScene(s, kb = false) {
         if (!s || !s.isConnected) return;
         commitEditing();
         closeMenu(true);
         closeBrush();
         const pieces = piecesOf(s);
         const keep = s._piece && pieces.some((t) => t._id === s._piece);
-        sceneEd = { scene: s, piece: keep ? s._piece : (pieces[0] ? pieces[0]._id : null), erase: false, down: false, btn: 0 };
+        sceneEd = { scene: s, piece: keep ? s._piece : (pieces[0] ? pieces[0]._id : null), erase: false, down: false, btn: 0, cx: 0, cy: 0, kb, spaceDown: false };
         sceneName.textContent = `{${nameOf(s)}}`;
         sceneW.value = s._w;
         sceneH.value = s._h;
@@ -1873,6 +1964,60 @@
           mgrid.appendChild(t);
         }
         renderMapTiles();
+        syncSceneCursor();
+      }
+
+      function syncSceneCursor() {
+        if (!sceneEd) return;
+        const s = sceneEd.scene;
+        sceneEd.cx = clamp(sceneEd.cx, 0, s._w - 1);
+        sceneEd.cy = clamp(sceneEd.cy, 0, s._h - 1);
+        for (const t of mgrid.querySelectorAll('.cur')) t.classList.remove('cur');
+        if (sceneEd.kb) mgrid.children[sceneEd.cy * s._w + sceneEd.cx].classList.add('cur');
+      }
+
+      function kbPlace(clear = false) {
+        sceneEd.btn = clear ? 2 : 0;
+        applyMap({ x: sceneEd.cx, y: sceneEd.cy });
+        sceneEd.btn = 0;
+      }
+
+      function sceneKeys(e) {
+        if (e.target === sceneW || e.target === sceneH) {
+          if (e.key === 'Escape') closeScene();
+          else if (e.key === 'Enter') e.target.blur();
+          return;
+        }
+        const k = e.key;
+        if (k === 'Escape') { e.preventDefault(); closeScene(); }
+        else if (DIRS[k]) {
+          e.preventDefault();
+          if (sceneEd.kb) { sceneEd.cx += DIRS[k][0]; sceneEd.cy += DIRS[k][1]; }
+          sceneEd.kb = true;
+          syncSceneCursor();
+          if (sceneEd.spaceDown) kbPlace();
+        } else if (k === ' ') {
+          e.preventDefault();
+          if (e.repeat) return;
+          sceneEd.kb = true;
+          syncSceneCursor();
+          sceneEd.spaceDown = true;
+          kbPlace();
+        } else if (k === 'Delete' || k === 'Backspace') {
+          e.preventDefault();
+          sceneEd.kb = true;
+          syncSceneCursor();
+          kbPlace(true);
+        } else if (k === ',' || k === '.') {
+          const list = piecesOf(sceneEd.scene);
+          if (!list.length) return;
+          const at = list.findIndex((t) => t._id === sceneEd.piece);
+          const next = list[(at + (k === '.' ? 1 : -1) + list.length) % list.length];
+          sceneEd.piece = next._id;
+          sceneEd.erase = false;
+          renderPieces();
+          syncSceneTools();
+        }
       }
 
       function renderMapTile(x, y, map, now) {
@@ -2244,7 +2389,12 @@
         n.addEventListener('keydown', (e) => {
           if (!editing || editing.el !== n) return;
           if (e.key === 'Escape') { e.preventDefault(); finishCommentEditing(true); }
-          else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); finishCommentEditing(false); }
+          else if ((e.key === 'Enter' && (e.metaKey || e.ctrlKey)) || e.key === 'Tab') {
+            e.preventDefault();
+            const kb = editing.kb;
+            finishCommentEditing(false);
+            if (kb) focusSelected();
+          }
           e.stopPropagation();
         });
       }
@@ -2552,7 +2702,10 @@
         if (brush && brush.tag === item) closeBrush();
         if (sceneEd && (sceneEd.scene === item || sceneEd.scene._folder === item)) closeScene();
         if (menu && menu.target === item) closeMenu(true);
-        if (selected === item) selected = null;
+        if (selected === item) {
+          const parent = (isTag(item) || isScene(item)) && item._folder && item._folder.isConnected ? item._folder : null;
+          select(parent);
+        }
         if (editing && editing.item === item) editing = null;
 
         if (isFree(item)) {
@@ -2951,7 +3104,8 @@
         if (editing && editing.el.contains(e.target)) return;
         e.preventDefault();
         if (brush || sceneEd) return;
-        if (e.target.closest('.orb') || e.target.closest('#pin')) return;
+        if (bar) closeBar();
+        if (e.target.closest('.orb') || e.target.closest('#pin') || e.target.closest('#kbar')) return;
         const note = e.target.closest('.comment-box');
         const target = note ? (note._owner || note) : e.target.closest(ITEM_SEL);
         openMenu(e.clientX, e.clientY, target);
@@ -2970,6 +3124,7 @@
         const item = e.button === 0 ? e.target.closest(ITEM_SEL) : null;
 
         if (menu) closeMenu();
+        if (bar) closeBar();
 
         if (!item) {
           commitEditing();
@@ -3106,35 +3261,210 @@
         else if (k === 'o') { e.preventDefault(); e.stopPropagation(); fileIn.click(); }
       }, true);
 
-      window.addEventListener('keydown', (e) => {
-        if (brush) { brushKeys(e); return; }
-        if (sceneEd) {
-          if (e.key === 'Escape') { e.preventDefault(); closeScene(); }
+      // ---------- Keyboard: move, create, act ----------
+      const kbar = $('kbar');
+      let bar = null; // { actions, i, target }
+      const posOf = (el) => ({ x: el._tx ?? el._x, y: el._ty ?? el._y });
+      const centerWorld = () => toWorld(window.innerWidth / 2, window.innerHeight / 2);
+
+      function focusSelected() {
+        requestAnimationFrame(() => {
+          if (!selected || !selected.isConnected) return;
+          const p = posOf(selected);
+          flyTo(p.x, p.y);
+        });
+      }
+
+      function focusOn(el) {
+        select(el);
+        focusSelected();
+      }
+
+      function navigate(k) {
+        const all = [...items()];
+        if (!all.length) return;
+        const cur = selected && selected.isConnected ? selected : null;
+        if (!cur) {
+          const c = centerWorld();
+          let best = null, bd = Infinity;
+          for (const el of all) {
+            const p = posOf(el), d = Math.hypot(p.x - c.x, p.y - c.y);
+            if (d < bd) { bd = d; best = el; }
+          }
+          focusOn(best);
           return;
         }
+        const [ux, uy] = DIRS[k];
+        const p = posOf(cur);
+        let best = null, bs = Infinity;
+        for (const el of all) {
+          if (el === cur) continue;
+          const q = posOf(el);
+          const dx = q.x - p.x, dy = q.y - p.y;
+          const along = dx * ux + dy * uy;
+          if (along <= 4) continue;
+          const across = Math.abs(dx * uy - dy * ux);
+          if (across > along * 2.2) continue;
+          const sc = along + across * 2;
+          if (sc < bs) { bs = sc; best = el; }
+        }
+        focusOn(best || cur);
+      }
+
+      function goUp() {
+        if (!selected) return;
+        if ((isTag(selected) || isScene(selected)) && selected._folder) focusOn(selected._folder);
+        else select(null);
+      }
+
+      function clusterSpot(fol) {
+        if (!fol) return centerWorld();
+        // to the right of everything this cluster owns: ring and scenes
+        let right = fol._x + fol._hw;
+        for (const t of fol._tags) right = Math.max(right, posOf(t).x + t.offsetWidth / 2);
+        for (const sc of fol._scenes) right = Math.max(right, sc._x + sc.offsetWidth / 2);
+        const x = right + 260;
+        let y = fol._y;
+        for (let i = 0; i < 40; i++) {
+          if (![...items()].some((o) => o !== fol && Math.abs(posOf(o).x - x) < 220 && Math.abs(posOf(o).y - y) < 160)) break;
+          y += 220;
+        }
+        return { x, y };
+      }
+
+      const DELIMS = new Set(['(', '<', '{', '[', '/']);
+
+      function keyCreate(k) {
+        const sel = selected && selected.isConnected ? selected : null;
+        const fol = sel ? (isFolder(sel) ? sel : sel._folder || null) : null;
+        if (k === '(' && fol) createTag(fol, false);
+        else if (k === '<' && fol) createTag(fol, true);
+        else if (k === '{' && fol) createScene(fol);
+        else if (k === '[') { const p = clusterSpot(fol); createFolder(p.x, p.y); }
+        else if (k === '/') {
+          if (sel) startCommentEditing(sel);
+          else { const c = centerWorld(); const n = makeFree(c.x, c.y); popIn(n); startCommentEditing(n); }
+        } else return;
+        if (editing) editing.kb = true;
+        focusSelected();
+      }
+
+      function openSelected() {
+        if (!selected) return;
+        if (isTag(selected)) openBrush(selected, true);
+        else if (isScene(selected)) openScene(selected, true);
+        else if (isFree(selected)) { startCommentEditing(selected); editing.kb = true; }
+      }
+
+      function openBar(actions = null) {
+        closeMenu(true);
+        const target = selected && selected.isConnected ? selected : null;
+        actions = actions || menuFor(target);
+        bar = { actions, i: 0, target };
+        kbar.innerHTML = '';
+        actions.forEach((a, idx) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'kbtn';
+          b.dataset.action = a.id;
+          b.setAttribute('aria-label', a.label);
+          if (a.id === 'swatch') {
+            b.classList.add('swatch');
+            b.style.setProperty('--swatch', a.color);
+            if (a.current) bar.i = idx;
+          } else b.innerHTML = svg(a.icon);
+          b.addEventListener('pointerdown', (e) => e.stopPropagation());
+          b.addEventListener('click', () => { if (!bar) return; bar.i = idx; runBar(); });
+          kbar.appendChild(b);
+        });
+        syncBar();
+        kbar.classList.add('open');
+        kbar.setAttribute('aria-hidden', 'false');
+      }
+
+      function closeBar() {
+        bar = null;
+        kbar.classList.remove('open');
+        kbar.setAttribute('aria-hidden', 'true');
+      }
+
+      function syncBar() {
+        [...kbar.children].forEach((b, i) => b.classList.toggle('focus', i === bar.i));
+      }
+
+      function runBar() {
+        const a = bar.actions[bar.i];
+        const target = bar.target;
+        closeBar();
+        if (a.id === 'color') { openBar(colorMenu(target)); return; }
+        if (a.id === 'swatch') { setFolderColor(target, a.color); return; }
+        if (a.id === 'brush') { openBrush(target, true); return; }
+        if (a.id === 'open') { openScene(target, true); return; }
+        menu = { x: window.innerWidth / 2, y: window.innerHeight / 2, target };
+        runAction(a);
+        if (editing) editing.kb = true;
+        focusSelected();
+      }
+
+      function barKeys(e) {
+        const k = e.key, n = bar.actions.length;
+        if (k === 'ArrowRight' || k === 'ArrowDown') { e.preventDefault(); bar.i = (bar.i + 1) % n; syncBar(); }
+        else if (k === 'ArrowLeft' || k === 'ArrowUp') { e.preventDefault(); bar.i = (bar.i - 1 + n) % n; syncBar(); }
+        else if (k === 'Enter' || k === ' ') { e.preventDefault(); runBar(); }
+        else if (k === 'Escape' || k === 'Tab') { e.preventDefault(); closeBar(); }
+      }
+
+      window.addEventListener('keydown', (e) => {
+        if (bar) { barKeys(e); return; }
+        if (brush) { brushKeys(e); return; }
+        if (sceneEd) { sceneKeys(e); return; }
         if (editing) {
           if (editing.isComment) {
             if (e.key === 'Escape') { e.preventDefault(); finishCommentEditing(true); }
             return;
           }
-          if (e.key === 'Enter') { e.preventDefault(); commitEditing(); }
-          else if (e.key === 'Escape') { e.preventDefault(); cancelEditing(); }
+          if (e.key === 'Enter' || e.key === 'Tab') {
+            e.preventDefault();
+            const kb = editing.kb;
+            commitEditing();
+            if (kb) focusSelected();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            const kb = editing.kb;
+            cancelEditing();
+            if (kb) focusSelected();
+          }
           return;
         }
-        if (e.key === 'Escape') {
-          if (menu) closeMenu(); else select(null);
-          return;
-        }
-        if ((e.key === 'Delete' || e.key === 'Backspace') && selected) {
+        if (e.metaKey) return;
+        const k = e.key;
+
+        // the signs come from any layout, with or without Shift / AltGr / Option
+        if (DELIMS.has(k)) { e.preventDefault(); if (menu) closeMenu(true); keyCreate(k); return; }
+        if (e.ctrlKey || e.altKey) return;
+
+        if (k === 'Tab') { e.preventDefault(); openBar(); return; }
+        if (DIRS[k]) {
           e.preventDefault();
-          removeItem(selected);
+          if (menu) closeMenu(true);
+          if (e.shiftKey) moveCamera(-DIRS[k][0] * 90, -DIRS[k][1] * 90);
+          else navigate(k);
           return;
         }
-        if (e.key === 'Enter' && selected) {
-          e.preventDefault();
-          if (isScene(selected)) openScene(selected);
-          else startEditing(selected);
-        }
+        if (k === '+' || k === '=') { zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.2); return; }
+        if (k === '-' || k === '_') { zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.2); return; }
+        if (k === 'Escape') { if (menu) closeMenu(); else goUp(); return; }
+        if (k === ' ') { e.preventDefault(); openSelected(); return; }
+        if (!selected) return;
+        if (k === 'Enter') { e.preventDefault(); startEditing(selected); editing && (editing.kb = true); return; }
+        if (k === 'Delete' || k === 'Backspace') { e.preventDefault(); removeItem(selected); focusSelected(); return; }
+        if (k.toLowerCase() === 'h') { toggleHidden(selected); }
+      });
+
+      window.addEventListener('keyup', (e) => {
+        if (e.key !== ' ') return;
+        if (brush && brush.spaceDown) { brush.spaceDown = false; syncTagVisual(brush.tag); }
+        if (sceneEd && sceneEd.spaceDown) { sceneEd.spaceDown = false; drawLines(); }
       });
 
       fileIn.addEventListener('change', () => {
